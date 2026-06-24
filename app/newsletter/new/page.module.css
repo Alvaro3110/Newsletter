@@ -1,0 +1,283 @@
+.page {
+  min-height: 100vh;
+  padding: 48px clamp(16px, 5vw, 72px);
+}
+
+.header {
+  display: grid;
+  gap: 12px;
+  margin: 0 auto 32px;
+  max-width: 1180px;
+}
+
+.kicker {
+  margin: 0;
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: clamp(2.1rem, 5vw, 4.2rem);
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.header p {
+  margin: 10px 0 0;
+  max-width: 640px;
+  color: var(--text-muted);
+  font-size: 1.02rem;
+  line-height: 1.6;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+  gap: 24px;
+  margin: 0 auto;
+  max-width: 1180px;
+  align-items: start;
+}
+
+.formPanel,
+.resultPanel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.formPanel {
+  padding: clamp(18px, 3vw, 32px);
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field span {
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.field input,
+.field select,
+.field textarea {
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  outline: none;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.field input,
+.field select {
+  min-height: 48px;
+  padding: 0 14px;
+}
+
+.field textarea {
+  min-height: 136px;
+  resize: vertical;
+  padding: 14px;
+  line-height: 1.5;
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-muted);
+}
+
+.field input[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 4px var(--danger-muted);
+}
+
+.fullWidth {
+  grid-column: 1 / -1;
+}
+
+.validationMessage {
+  margin: 16px 0 0;
+  border-radius: 8px;
+  background: var(--danger-muted);
+  color: var(--danger);
+  padding: 12px 14px;
+  font-weight: 700;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 24px;
+}
+
+.primaryButton {
+  min-width: 190px;
+  min-height: 48px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 800;
+  transition:
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.primaryButton:hover:not(:disabled) {
+  background: var(--accent-strong);
+  transform: translateY(-1px);
+}
+
+.primaryButton:disabled {
+  opacity: 0.7;
+}
+
+.resultPanel {
+  min-height: 320px;
+  padding: 24px;
+}
+
+.resultHeader {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 22px;
+}
+
+.statusDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.resultHeader h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: 0;
+}
+
+.emptyState {
+  margin: 0;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  padding: 18px;
+  line-height: 1.5;
+}
+
+.loadingState,
+.errorState,
+.successState {
+  border-radius: 8px;
+  padding: 18px;
+}
+
+.loadingState {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  background: var(--accent-muted);
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.loadingState p,
+.errorState p {
+  margin: 0;
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 3px solid rgba(15, 118, 110, 0.22);
+  border-top-color: var(--accent);
+  border-radius: 999px;
+  animation: spin 800ms linear infinite;
+}
+
+.errorState {
+  background: var(--danger-muted);
+  color: var(--danger);
+}
+
+.errorState strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.successState {
+  background: var(--success-muted);
+}
+
+.successState dl {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+}
+
+.successState div {
+  display: grid;
+  gap: 6px;
+}
+
+.successState dt {
+  color: var(--success);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.successState dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 860px) {
+  .page {
+    padding: 28px 16px;
+  }
+
+  .workspace,
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .actions {
+    justify-content: stretch;
+  }
+
+  .primaryButton {
+    width: 100%;
+  }
+}
