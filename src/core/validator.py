@@ -1,6 +1,13 @@
+import json
+import logging
 import re
+from datetime import datetime, timezone
+from pathlib import Path
+
 import markdown
 from premailer import transform
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CSS = """
 body {
@@ -50,6 +57,7 @@ th {
 }
 """
 
+
 def validate_essay_seniority(essay: str) -> list[str]:
     """
     Validates essay according to the Seniority Checklist:
@@ -60,51 +68,60 @@ def validate_essay_seniority(essay: str) -> list[str]:
     5. Trade-offs table present with correct column headers.
     """
     errors = []
-    
-    # 1. Word count
+
     words = essay.split()
     word_count = len(words)
     if word_count < 1000:
         errors.append(f"Word count ({word_count}) is below 1000 words.")
     elif word_count > 2500:
         errors.append(f"Word count ({word_count}) exceeds 2500 words.")
-        
-    # 2. Fluff adjectives
+
     fluff_words = ["revolutionary", "incredible", "amazing", "fantastic", "groundbreaking", "revolucionário", "incrível", "fantástico", "espetacular"]
     found_fluff = [f for f in fluff_words if re.search(r'\b' + re.escape(f) + r'\b', essay, re.IGNORECASE)]
     if found_fluff:
         errors.append(f"Contains fluff adjectives: {found_fluff}")
-        
-    # 3. Metrics
+
     if not re.search(r'\b\d+(\.\d+)?%?\b', essay):
         errors.append("Lacks concrete metrics or numbers.")
-        
-    # 4. Links
+
     if not re.search(r'https?://[^\s]+', essay):
         errors.append("Lacks official documentation reference links.")
-        
-    # 5. Trade-off table columns
+
     required_columns = ["Prós", "Contras", "Decisão Técnica"]
-    has_table = True
-    for col in required_columns:
-        if col not in essay:
-            has_table = False
-            break
+    has_table = all(column in essay for column in required_columns)
     if not has_table:
         errors.append("Lacks Pros/Cons/Decision technical table.")
-        
+
     return errors
 
-def inline_css_newsletter(markdown_content: str, custom_css: str = DEFAULT_CSS) -> str:
+
+def _write_text_file(path: str, content: str) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+
+
+def _write_json_file(path: str, payload: dict[str, object]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def inline_css_newsletter(
+    markdown_content: str,
+    custom_css: str = DEFAULT_CSS,
+    *,
+    raw_markdown_path: str | None = None,
+    metadata_path: str | None = None,
+) -> str:
     """
     Converts markdown content to HTML, wraps it with styles,
     and runs premailer to inline styles for maximum email compatibility.
+    If the inline step fails, saves the raw Markdown and metadata for operator triage.
     """
-    # 1. Render Markdown to HTML (including tables extension)
-    html_body = markdown.markdown(markdown_content, extensions=['tables'])
-    
-    # 2. Wrap in HTML template with CSS
-    full_html = f"""<!DOCTYPE html>
+    try:
+        html_body = markdown.markdown(markdown_content, extensions=["tables"])
+        full_html = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -118,7 +135,24 @@ def inline_css_newsletter(markdown_content: str, custom_css: str = DEFAULT_CSS) 
 </body>
 </html>
 """
-    
-    # 3. Process with Premailer inliner
-    inlined_html = transform(full_html)
-    return inlined_html
+        return transform(full_html)
+    except Exception as exc:  # pragma: no cover - exercised through failure-mode tests
+        logger.critical("Newsletter inliner failed; preserving raw markdown", exc_info=True)
+
+        if raw_markdown_path:
+            _write_text_file(raw_markdown_path, markdown_content)
+
+        if metadata_path:
+            _write_json_file(
+                metadata_path,
+                {
+                    "status": "critical",
+                    "stage": "html_inliner",
+                    "error": str(exc),
+                    "markdown_saved": bool(raw_markdown_path),
+                    "markdown_length": len(markdown_content),
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+
+        return markdown_content
