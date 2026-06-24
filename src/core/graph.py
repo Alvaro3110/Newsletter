@@ -1,36 +1,158 @@
-import sqlite3
-import re
+import json
 import logging
-from typing import Dict, Any, List
-from langgraph.graph import StateGraph, START, END
+import os
+import re
+import sqlite3
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, List
+
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
 
 from src.core.state import NewsletterState
 
 logger = logging.getLogger(__name__)
+
+
+def _internal_research_sources(topic: str, reason: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "url": "https://langchain-ai.github.io/langgraph/concepts/persistence/",
+            "snippet": (
+                f"Fallback interno para '{topic}': LangGraph mantém checkpoints persistentes "
+                "com checkpointers locais quando a busca externa não está disponível."
+            ),
+            "authority_score": 0.82,
+            "source_origin": "internal_llm_knowledge",
+            "freshness": "stale",
+            "freshness_note": reason,
+        },
+        {
+            "url": "https://www.sqlite.org/wal.html",
+            "snippet": (
+                "SQLite em modo WAL reduz contenção em leituras locais, mas ainda exige "
+                "cuidados com locks sob concorrência de escrita."
+            ),
+            "authority_score": 0.9,
+            "source_origin": "internal_llm_knowledge",
+            "freshness": "stale",
+            "freshness_note": reason,
+        },
+    ]
+
+
+def _fetch_research_sources(topic: str) -> list[dict[str, Any]]:
+    api_url = os.getenv("RESEARCH_API_URL")
+    if not api_url:
+        raise RuntimeError("RESEARCH_API_URL not configured")
+
+    timeout = float(os.getenv("RESEARCH_API_TIMEOUT_SECONDS", "10"))
+    query = urllib.parse.urlencode({"q": topic})
+    url = f"{api_url}{'&' if '?' in api_url else '?'}{query}"
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+
+    token = os.getenv("RESEARCH_API_TOKEN")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    raw_sources = payload.get("sources") if isinstance(payload, dict) else payload
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise ValueError("Research API returned no usable sources")
+
+    normalized_sources: list[dict[str, Any]] = []
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            continue
+        normalized_sources.append(
+            {
+                "url": source.get("url", ""),
+                "snippet": source.get("snippet", ""),
+                "authority_score": source.get("authority_score", 0.5),
+                "source_origin": source.get("source_origin", "external_search"),
+                "freshness": source.get("freshness", "current"),
+            }
+        )
+
+    if not normalized_sources:
+        raise ValueError("Research API returned no normalized sources")
+
+    return normalized_sources
+
+
+def _research_sources_with_retry(topic: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    retry_attempts = max(int(os.getenv("RESEARCH_RETRY_ATTEMPTS", "3")), 1)
+    base_delay = max(float(os.getenv("RESEARCH_RETRY_BASE_DELAY_SECONDS", "0.25")), 0.0)
+    last_error: Exception | None = None
+
+    if not os.getenv("RESEARCH_API_URL"):
+        reason = "RESEARCH_API_URL not configured"
+        logger.warning("Research API unavailable; using internal knowledge fallback", extra={"topic": topic})
+        return _internal_research_sources(topic, reason), {
+            "research_mode": "internal_fallback",
+            "research_stale": True,
+            "research_error": reason,
+            "research_attempts": 0,
+        }
+
+    for attempt in range(1, retry_attempts + 1):
+        try:
+            sources = _fetch_research_sources(topic)
+            return sources, {
+                "research_mode": "external_search",
+                "research_stale": False,
+                "research_error": None,
+                "research_attempts": attempt,
+            }
+        except (urllib.error.URLError, TimeoutError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            last_error = exc
+            if attempt < retry_attempts:
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "Research attempt failed; retrying with exponential backoff",
+                    extra={"topic": topic, "attempt": attempt, "delay_seconds": delay, "error": str(exc)},
+                )
+                time.sleep(delay)
+                continue
+            break
+
+    assert last_error is not None
+    logger.warning(
+        "Research API failed after retries; falling back to internal knowledge",
+        extra={"topic": topic, "error": str(last_error)},
+    )
+    return _internal_research_sources(topic, str(last_error)), {
+        "research_mode": "internal_fallback",
+        "research_stale": True,
+        "research_error": str(last_error),
+        "research_attempts": retry_attempts,
+    }
+
 
 def research_node(state: NewsletterState) -> Dict[str, Any]:
     """
     Research Node: Fetches and gathers technical data and documentation sources.
     """
     topic = state.get("topic_context", "SQLite Checkpointing in LangGraph")
-    logger.info(f"Running Research Node for topic: {topic}")
-    
-    # Mocking technical source gathering from authoritative documentation
-    sources = [
+    logger.info("Running Research Node for topic: %s", topic)
+
+    sources, research_metadata = _research_sources_with_retry(topic)
+    metadata = dict(state.get("metadata", {}))
+    metadata.update(
         {
-            "url": "https://langchain-ai.github.io/langgraph/concepts/persistence/",
-            "snippet": "LangGraph supports state persistence using checkpointers. SqliteSaver uses a local SQLite database to serialize and store the thread state checkpoints.",
-            "authority_score": 0.95
-        },
-        {
-            "url": "https://www.sqlite.org/wcss.html",
-            "snippet": "SQLite is a transactional database engine that is highly reliable and does not require separate server configuration. High concurrency writes can trigger lock database errors.",
-            "authority_score": 0.99
+            "topic_context": topic,
+            "research_metadata": research_metadata,
         }
-    ]
-    
-    return {"research_sources": sources}
+    )
+
+    return {"research_sources": sources, "metadata": metadata}
+
 
 def analyze_node(state: NewsletterState) -> Dict[str, Any]:
     """
@@ -39,17 +161,18 @@ def analyze_node(state: NewsletterState) -> Dict[str, Any]:
     """
     logger.info("Running Analyze Node (Trade-offs Layer)")
     sources = state.get("research_sources", [])
-    
+
     # Enforcing Gergely Orosz style: analyzing trade-offs of SQLite for checkpointing
     analytical_points = [
         {
             "pros": "Zero-config setup, extremely fast local reads/writes, transactional integrity with WAL mode, single-file deployment.",
             "cons": "No horizontal scalability, lock contention under concurrent writes, limited support for high-throughput distributed environments.",
-            "decision_technical": "Use SqliteSaver for local developer machine setup and single-tenant background worker runtimes."
+            "decision_technical": "Use SqliteSaver for local developer machine setup and single-tenant background worker runtimes.",
         }
     ]
-    
-    return {"analytical_points": analytical_points}
+
+    return {"analytical_points": analytical_points, "metadata": {**state.get("metadata", {}), "source_count": len(sources)}}
+
 
 def synthesize_node(state: NewsletterState) -> Dict[str, Any]:
     """
@@ -60,10 +183,7 @@ def synthesize_node(state: NewsletterState) -> Dict[str, Any]:
     topic = state.get("topic_context", "SQLite Checkpointing in LangGraph")
     tradeoffs = state.get("analytical_points", [])
     validation_logs = state.get("validation_logs", [])
-    
-    # Let's generate a high-quality, long-form essay (aiming for word count constraint, e.g. 1000+ words).
-    # We will programmatically generate a long, highly detailed technical essay.
-    
+
     essay_body = f"""# Aprofundamento Técnico: {topic}
 
 Na engenharia de sistemas modernos baseados em LLM, a resiliência e a persistência de estado são desafios críticos. Ao construir agentes com LangGraph, a escolha da camada de persistência define a capacidade de recuperação contra falhas de rede, reinicializações de servidores e estouros de limites de rate limit de APIs externas. 
@@ -109,12 +229,9 @@ Em testes empíricos executados em infraestrutura de contêiner isolada, a inici
 Para referências de arquitetura adicionais e guias de implantação detalhados, consulte a documentação oficial da ferramenta em: https://langchain-ai.github.io/langgraph/ e a especificação de concorrência do SQLite em: https://www.sqlite.org/threadsafe.html.
 """
 
-    # If previous validation failed, we append the log to show self-correction in progress
     if validation_logs:
         essay_body += f"\n\n<!-- Correção aplicada após falha de validação anterior: {validation_logs[-1]} -->\n"
 
-    # To satisfy the 1000-word lower bound strictly, we repeat a thorough system specifications section if needed.
-    # A word in text is defined by split on space. Let's count words.
     words = essay_body.split()
     if len(words) < 1000:
         extra_technical_details = """
@@ -150,11 +267,11 @@ Isso garante visibilidade completa do desempenho operacional e previne regressõ
 """
         essay_body += extra_technical_details
 
-    # Re-calculate word count to guarantee
     words = essay_body.split()
-    logger.info(f"Generated essay with {len(words)} words.")
-    
-    return {"essay_draft": essay_body}
+    logger.info("Generated essay with %s words.", len(words))
+
+    return {"essay_draft": essay_body, "metadata": {**state.get("metadata", {}), "essay_word_count": len(words)}}
+
 
 def review_node(state: NewsletterState) -> Dict[str, Any]:
     """
@@ -164,49 +281,40 @@ def review_node(state: NewsletterState) -> Dict[str, Any]:
     logger.info("Running Review Node (Seniority Checklist)")
     essay = state.get("essay_draft", "")
     validation_logs = list(state.get("validation_logs", []))
-    
+
     errors = []
-    
-    # 1. Word count validation (1000 - 2500 words)
+
     words = essay.split()
     word_count = len(words)
     if word_count < 1000:
         errors.append(f"Word count ({word_count}) is below the required 1000-word limit.")
     elif word_count > 2500:
         errors.append(f"Word count ({word_count}) exceeds the maximum 2500-word limit.")
-        
-    # 2. Check for fluff/adjectives desnecessários
+
     fluff_words = ["revolutionary", "incredible", "amazing", "fantastic", "groundbreaking", "revolucionário", "incrível", "fantástico", "espetacular"]
     found_fluff = [f for f in fluff_words if re.search(r'\b' + re.escape(f) + r'\b', essay, re.IGNORECASE)]
     if found_fluff:
         errors.append(f"Essay contains prohibited fluff words: {found_fluff}")
-        
-    # 3. Check for metrics/numbers
+
     if not re.search(r'\b\d+(\.\d+)?%?\b', essay):
         errors.append("Essay lacks concrete metrics, numbers, or performance percentages.")
-        
-    # 4. Check for official documentation links (starts with https://)
+
     if not re.search(r'https?://[^\s]+', essay):
         errors.append("Essay lacks official documentation reference links.")
-        
-    # 5. Check for Pros vs Cons Table with specific columns
+
     required_cols = ["Prós", "Contras", "Decisão Técnica"]
-    has_table = True
-    for col in required_cols:
-        if col not in essay:
-            has_table = False
-            break
-    if not has_table:
+    if not all(col in essay for col in required_cols):
         errors.append("Essay lacks required Pros/Cons/Decision technical table structure.")
 
     if errors:
         error_msg = "; ".join(errors)
-        logger.warning(f"Validation FAILED: {error_msg}")
+        logger.warning("Validation FAILED: %s", error_msg)
         validation_logs.append(error_msg)
         return {"validation_logs": validation_logs}
-    else:
-        logger.info("Validation PASSED successfully.")
-        return {"validation_logs": validation_logs}
+
+    logger.info("Validation PASSED successfully.")
+    return {"validation_logs": validation_logs}
+
 
 def determine_next_node(state: NewsletterState) -> str:
     """
@@ -214,10 +322,6 @@ def determine_next_node(state: NewsletterState) -> str:
     """
     logs = state.get("validation_logs", [])
     if logs:
-        # Check if the last log is an error.
-        # In a real setup, we compare previous states. Here, if logs exist, we check if we resolved them.
-        # If there's an error in the last log, and it hasn't been cleared, we route back to Synthesize.
-        # But to prevent infinite loops in mock runs, we allow it to pass on the second try.
         if len(logs) > 1:
             logger.info("Self-correction loop completed successfully after retry.")
             return END
@@ -225,38 +329,36 @@ def determine_next_node(state: NewsletterState) -> str:
         return "Synthesize"
     return END
 
+
 def compile_graph(db_path: str = "content/newsletter_state.db") -> Any:
     """
     Compiles the LangGraph StateGraph with SQLite persistence.
     """
+    db_file = Path(db_path).expanduser()
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+
     workflow = StateGraph(NewsletterState)
-    
-    # Add Nodes
     workflow.add_node("Research", research_node)
     workflow.add_node("Analyze", analyze_node)
     workflow.add_node("Synthesize", synthesize_node)
     workflow.add_node("Review", review_node)
-    
-    # Add Edges
+
     workflow.add_edge(START, "Research")
     workflow.add_edge("Research", "Analyze")
     workflow.add_edge("Analyze", "Synthesize")
     workflow.add_edge("Synthesize", "Review")
-    
-    # Conditional routing from Review
+
     workflow.add_conditional_edges(
         "Review",
         determine_next_node,
         {
             "Synthesize": "Synthesize",
-            END: END
-        }
+            END: END,
+        },
     )
-    
-    # SQLite connection persistence
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+
+    conn = sqlite3.connect(str(db_file), check_same_thread=False)
     memory = SqliteSaver(conn)
-    
-    # Compile Graph
+
     app = workflow.compile(checkpointer=memory)
     return app
